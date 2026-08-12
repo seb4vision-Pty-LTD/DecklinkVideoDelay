@@ -4,6 +4,7 @@
 #include <QGroupBox>
 #include <QDebug>
 #include <cmath>
+#include <iostream>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle("DeckLink Dual-Channel Delay & Processing Matrix (C++20)");
@@ -73,8 +74,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_delaySpinBox1->setValue(0.000);
     m_delaySpinBox1->setSuffix(" sec");
 
-    m_startBtn = new QPushButton("Start Pipeline");
-    m_stopBtn = new QPushButton("Stop Pipeline");
+    m_startBtn = new QPushButton("Start");
+    m_stopBtn = new QPushButton("Stop");
     m_stopBtn->setEnabled(false);
 
     // Group controls for Channel 0
@@ -235,29 +236,76 @@ GstBusSyncReply MainWindow::busSyncHandler(GstBus *bus, GstMessage *message, gpo
 
     // 2. Process Level Element Messages for Audio Bar Updates
     if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ELEMENT) {
+        
         const GstStructure *s = gst_message_get_structure(message);
-        if (gst_structure_has_name(s, "level")) {
+        if (s && gst_structure_has_name(s, "level")) {
+            
             const gchar *srcName = GST_OBJECT_NAME(GST_MESSAGE_SRC(message));
             const GValue *list_rms = gst_structure_get_value(s, "rms");
 
             if (list_rms) {
                 double rms_l = -60.0;
                 double rms_r = -60.0;
+                bool parsedRms = false;
 
-                // FIX: GStreamer 'level' uses GstValueList, not GstValueArray
+                // Different GStreamer builds expose "rms" using different container types.
+#if defined(G_TYPE_VALUE_ARRAY)
+                if (G_VALUE_TYPE(list_rms) == G_TYPE_VALUE_ARRAY) {
+                    const auto *legacyArray = static_cast<const GValueArray *>(g_value_get_boxed(list_rms));
+                    if (legacyArray && legacyArray->n_values > 0) {
+                        const GValue *v0 = g_value_array_get_nth(const_cast<GValueArray *>(legacyArray), 0);
+                        const GValue *v1 = (legacyArray->n_values > 1)
+                            ? g_value_array_get_nth(const_cast<GValueArray *>(legacyArray), 1)
+                            : v0;
+
+                        if (v0 && G_VALUE_HOLDS_DOUBLE(v0)) {
+                            rms_l = g_value_get_double(v0);
+                            rms_r = (v1 && G_VALUE_HOLDS_DOUBLE(v1)) ? g_value_get_double(v1) : rms_l;
+                            parsedRms = true;
+                        }
+                    }
+                } else
+#endif
                 if (GST_VALUE_HOLDS_LIST(list_rms) && gst_value_list_get_size(list_rms) > 0) {
                     rms_l = g_value_get_double(gst_value_list_get_value(list_rms, 0));
                     rms_r = (gst_value_list_get_size(list_rms) > 1) ? 
                              g_value_get_double(gst_value_list_get_value(list_rms, 1)) : rms_l;
+                    parsedRms = true;
                 } 
-                // Fallback just in case a future GStreamer version switches to Array
                 else if (GST_VALUE_HOLDS_ARRAY(list_rms) && gst_value_array_get_size(list_rms) > 0) {
                     rms_l = g_value_get_double(gst_value_array_get_value(list_rms, 0));
                     rms_r = (gst_value_array_get_size(list_rms) > 1) ? 
                              g_value_get_double(gst_value_array_get_value(list_rms, 1)) : rms_l;
+                    parsedRms = true;
+                } else if (G_VALUE_HOLDS_DOUBLE(list_rms)) {
+                    rms_l = g_value_get_double(list_rms);
+                    rms_r = rms_l;
+                    parsedRms = true;
                 }
 
-                int ch = (g_strcmp0(srcName, "lvl0") == 0) ? 0 : 1;
+                if (!parsedRms) {
+                    std::cout << "Unhandled RMS type from " << srcName
+                              << ": " << G_VALUE_TYPE_NAME(list_rms) << std::endl;
+                    gst_message_unref(message);
+                    return GST_BUS_DROP;
+                }
+
+                // std::cout << "Level Message from " << srcName << ": RMS L="
+                //           << rms_l << " dB, RMS R=" << rms_r << " dB"
+                //           << " (type=" << G_VALUE_TYPE_NAME(list_rms) << ")" << std::endl;
+
+                int ch = -1;
+                if (g_strcmp0(srcName, "lvl0") == 0) {
+                    ch = 0;
+                } else if (g_strcmp0(srcName, "lvl1") == 0) {
+                    ch = 1;
+                }
+
+                if (ch < 0) {
+                    std::cout << "Ignoring level message from unexpected element: "
+                              << srcName << std::endl;
+                    return GST_BUS_PASS;
+                }
 
                 QMetaObject::invokeMethod(self, [self, ch, rms_l, rms_r]() {
                     auto convertDbToPercent = [](double db) -> int {
@@ -273,7 +321,7 @@ GstBusSyncReply MainWindow::busSyncHandler(GstBus *bus, GstMessage *message, gpo
                         self->m_audioBarCh1_L->setValue(convertDbToPercent(rms_l));
                         self->m_audioBarCh1_R->setValue(convertDbToPercent(rms_r));
                     }
-                });
+                }, Qt::QueuedConnection);
             }
         }
     }
