@@ -7,7 +7,7 @@
 #include <iostream>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-    setWindowTitle("DeckLink Dual-Channel Delay & Processing Matrix (C++20)");
+    setWindowTitle("DeckLink Dual-Channel Delay");
     resize(1280, 800);
 
     // --- Create Video Rendering Widgets ---
